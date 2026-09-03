@@ -343,11 +343,11 @@ class ActivityTab(QWidget):
 # SIDEBAR — tabs as buttons + merged quick launch
 # ===========================================================================
 class Sidebar(QWidget):
-    def __init__(self, on_nav_click, on_webapp_click, on_quicklaunch_click):
+    def __init__(self, on_nav_click, on_webapp_click):
         super().__init__()
-        self._init_ui(on_nav_click, on_webapp_click, on_quicklaunch_click)
+        self._init_ui(on_nav_click, on_webapp_click)
 
-    def _init_ui(self, on_nav, on_webapp, on_ql):
+    def _init_ui(self, on_nav, on_webapp):
         self.setObjectName("sidebar")
         self.setFixedWidth(200)
         layout = QVBoxLayout(self); layout.setSpacing(4); layout.setContentsMargins(0, 12, 0, 12)
@@ -380,19 +380,11 @@ class Sidebar(QWidget):
             layout.addWidget(btn); self.nav_buttons.append(btn)
         layout.addSpacing(12)
 
-        # WEB APPS (open in browser)
+        # WEB APPS (open embedded in Koga OS)
         sec3 = QLabel("AI APPS"); sec3.setObjectName("section"); layout.addWidget(sec3)
         for app in CFG.get("web_apps", []):
             btn = QPushButton(app["name"]); btn.setObjectName("nav")
-            btn.clicked.connect(lambda checked, url=app["url"]: on_webapp(url))
-            layout.addWidget(btn)
-        layout.addSpacing(12)
-
-        # QUICK LAUNCH (merged — James, Obsidian, Claude Desktop, etc.)
-        sec4 = QLabel("QUICK LAUNCH"); sec4.setObjectName("section"); layout.addWidget(sec4)
-        for name, cmd in CFG.get("quick_launch", {}).items():
-            btn = QPushButton(name); btn.setObjectName("nav")
-            btn.clicked.connect(lambda checked, c=cmd: on_quicklaunch(c))
+            btn.clicked.connect(lambda checked, name=app["name"], url=app["url"]: on_webapp(name, url))
             layout.addWidget(btn)
 
         layout.addStretch()
@@ -411,14 +403,21 @@ class Sidebar(QWidget):
 # RIGHT PANEL — system stats + clock (no quick launch)
 # ===========================================================================
 class RightPanel(QWidget):
-    def __init__(self):
-        super().__init__(); self._init_ui()
+    def __init__(self, quick_launch=None):
+        super().__init__(); self.quick_launch = quick_launch or {}; self._init_ui()
     def _init_ui(self):
         self.setObjectName("rightpanel"); self.setFixedWidth(220)
         layout = QVBoxLayout(self); layout.setSpacing(12); layout.setContentsMargins(12,12,12,12)
         sec = QLabel("SYSTEM"); sec.setObjectName("section"); layout.addWidget(sec)
         self.cpu_bar = QProgressBar(); self.cpu_bar.setFormat("CPU: %p%"); layout.addWidget(self.cpu_bar)
         self.ram_bar = QProgressBar(); self.ram_bar.setFormat("RAM: %p%"); layout.addWidget(self.ram_bar)
+        layout.addSpacing(12)
+        # Quick Launch moved here
+        sec2 = QLabel("QUICK LAUNCH"); sec2.setObjectName("section"); layout.addWidget(sec2)
+        for name, cmd in self.quick_launch.items():
+            btn = QPushButton(name); btn.setObjectName("launch")
+            btn.clicked.connect(lambda checked, c=cmd: subprocess.Popen(c, shell=True))
+            layout.addWidget(btn)
         layout.addStretch()
         self.clock = QLabel(); self.clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.clock.setStyleSheet(f"color:{C_BLUE};font-size:22px;font-weight:bold;font-family:Consolas;")
@@ -508,28 +507,31 @@ class KogaWindow(QMainWindow):
 
         top = QHBoxLayout(); top.setSpacing(0)
 
-        # Sidebar with nav tabs + web apps + quick launch
-        self.sidebar = Sidebar(self._on_nav, self._on_webapp, self._on_quicklaunch)
+        # Sidebar with nav tabs + web apps (no quick launch here)
+        self.sidebar = Sidebar(self._on_nav, self._on_webapp)
         top.addWidget(self.sidebar)
 
-        # Center: stacked widget + command bar
+        # Center: tab widget (native + embedded web apps) + command bar
         center = QVBoxLayout(); center.setSpacing(0); center.setContentsMargins(0,0,0,0)
 
-        self.stack = QStackedWidget()
+        self.tabs = QTabWidget()
+        self.tabs.setTabsClosable(True)
+        self.tabs.tabCloseRequested.connect(self._close_tab)
 
         # Build native tabs
-        self.chat_widget = AIChatWidget(CFG); self.stack.addWidget(self.chat_widget)
-        self.proc_tab = ProcessManagerTab(CFG); self.stack.addWidget(self.proc_tab)
-        self.mem_tab = MemoryTab(CFG); self.stack.addWidget(self.mem_tab)
-        self.activity_tab = ActivityTab(); self.stack.addWidget(self.activity_tab)
+        self.chat_widget = AIChatWidget(CFG); self.tabs.addTab(self.chat_widget, "Chat")
+        self.proc_tab = ProcessManagerTab(CFG); self.tabs.addTab(self.proc_tab, "Processes")
+        self.mem_tab = MemoryTab(CFG); self.tabs.addTab(self.mem_tab, "Memory")
+        self.activity_tab = ActivityTab(); self.tabs.addTab(self.activity_tab, "Activity")
 
-        self.stack.setCurrentIndex(0)
-        center.addWidget(self.stack, 1)
+        self.tabs.setCurrentIndex(0)
+        center.addWidget(self.tabs, 1)
 
         self.cmd_bar = CommandBar(CFG); center.addWidget(self.cmd_bar)
         top.addLayout(center, 1)
 
-        self.right_panel = RightPanel(); top.addWidget(self.right_panel)
+        # Right panel with quick launch
+        self.right_panel = RightPanel(CFG.get("quick_launch", {})); top.addWidget(self.right_panel)
         main_layout.addLayout(top, 1)
 
         self.status_bar = StatusBar(); main_layout.addWidget(self.status_bar)
@@ -540,17 +542,22 @@ class KogaWindow(QMainWindow):
 
     def _on_nav(self, idx):
         self.sidebar.set_active_nav(idx)
-        self.stack.setCurrentIndex(idx)
-        ACTIVITY.add("Nav", f"Switched to {CFG.get('nav_tabs',[])[idx]['name']}")
+        self.tabs.setCurrentIndex(idx)
+        nav_names = [t["name"] for t in CFG.get("nav_tabs", [])]
+        if idx < len(nav_names):
+            ACTIVITY.add("Nav", f"Switched to {nav_names[idx]}")
 
-    def _on_webapp(self, url):
-        import webbrowser
-        webbrowser.open(url)
-        ACTIVITY.add("Sidebar", f"Opened {url}")
+    def _on_webapp(self, name, url):
+        # Open embedded in Koga OS as a new tab
+        widget = WebTabWidget(url, name)
+        idx = self.tabs.addTab(widget, name)
+        self.tabs.setCurrentIndex(idx)
+        ACTIVITY.add("Sidebar", f"Opened {name} as tab")
 
-    def _on_quicklaunch(self, cmd):
-        try: subprocess.Popen(cmd, shell=True); ACTIVITY.add("Sidebar", f"Launched: {cmd[:50]}")
-        except Exception as e: ACTIVITY.add("Sidebar", f"Launch error: {e}", "ERROR")
+    def _close_tab(self, idx):
+        # Don't close the first 4 native tabs
+        if idx >= 4:
+            self.tabs.removeTab(idx)
 
     def _on_status(self, status):
         self.sidebar.update_status(status)
